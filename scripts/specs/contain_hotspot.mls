@@ -1,0 +1,123 @@
+// ----------------------------------------------------------------------------
+// scripts/specs/contain_hotspot.mls
+//
+// MoonLight STREL specification for hotspot containment (quenching) properties
+// over a 2-D thermal field modeled as a weighted spatial graph.
+//
+// Physical context
+// ----------------
+// The 2-D heat equation models thermal diffusion in structures such as
+// heat shields, satellite panels, and turbine-blade cross-sections. A
+// localized initial hotspot diffuses outward and decays toward ambient
+// temperature under homogeneous Dirichlet boundary conditions. The
+// specifications below encode safety envelopes and cooldown requirements
+// directly relevant to these aerospace thermal-management scenarios.
+//
+// Signal
+// ------
+//   hot : bool
+//     Per-location predicate indicating whether the field value exceeds a
+//     safety threshold, i.e. hot(x,y,t) := u(x,y,t) >= theta.
+//
+// Space model
+// -----------
+//   dist : real
+//     Edge weight used by spatial operators. In the repo's heat2d grid
+//     graph, dist = 1.0 (hop distance) or dist = dx (physical spacing).
+//
+// Semantics
+// ---------
+// Boolean domain: MoonLight interprets a numeric input v as True if v >= 0
+// and False if v < 0. Signals are encoded as +1.0 (hot) / -1.0 (not hot).
+//
+// For quantitative robustness (min-max), switch to a real-valued signal
+// and arithmetic atomic predicates (e.g., temp - T_max) with domain minmax.
+// ----------------------------------------------------------------------------
+
+signal {
+  bool hot;
+}
+
+space {
+  edges {
+    real dist;
+  }
+}
+
+domain boolean;
+
+// ============================================================================
+// Spatial helpers
+// ============================================================================
+
+// True at location l iff there exists a hot location within distance radius.
+formula hot_within(real radius) =
+  somewhere(dist)[0.0, radius](hot);
+
+// True at location l iff no location within distance radius is hot.
+formula no_hot_within(real radius) =
+  !(hot_within(radius));
+
+// True at location l iff no location in the entire graph is hot.
+// Equivalent to: everywhere(dist)[0.0, inf](!(hot)).
+formula nowhere_hot =
+  !(somewhere(dist)[0.0, inf](hot));
+
+// ============================================================================
+// Core temporal specifications
+// ============================================================================
+
+// Quench: from the current time onward, no location in the graph is hot.
+//   G (nowhere_hot)
+formula quench =
+  globally(nowhere_hot);
+
+// Contain: eventually the system reaches a permanently quenched state.
+//   F (G (nowhere_hot))
+formula contain =
+  eventually(quench);
+
+// Cool-eventually: eventually all cells drop below the threshold, but the
+// system is not required to remain cool (weaker than contain).
+//   F (nowhere_hot)
+// This captures the "eventually" cooling property: after sufficient time,
+// the thermal field cools below the safety bound.
+formula cool_eventually =
+  eventually(nowhere_hot);
+
+// ============================================================================
+// Bounded temporal specifications
+// ============================================================================
+
+// Quench-for: no location is hot for the next dwell time units.
+//   G_[0, dwell] (nowhere_hot)
+formula quench_for(real dwell) =
+  globally[0.0, dwell](nowhere_hot);
+
+// Contain-within: within deadline time units the system quenches and
+// remains quenched for at least dwell time units.
+//   F_[0, deadline] (G_[0, dwell] (nowhere_hot))
+formula contain_within(real deadline, real dwell) =
+  eventually[0.0, deadline](quench_for(dwell));
+
+// Cool-by: all cells drop below the threshold within deadline time units.
+//   F_[0, deadline] (nowhere_hot)
+formula cool_by(real deadline) =
+  eventually[0.0, deadline](nowhere_hot);
+
+// ============================================================================
+// Concrete bounded instances (used by tests and demos)
+// ============================================================================
+
+// Contain-within-5: within 5 time units the system enters a quenched
+// state that persists for at least 5 time units.
+//   F_[0, 5] (G_[0, 5] (nowhere_hot))
+formula contain_within_5 =
+  eventually[0.0, 5.0](globally[0.0, 5.0](nowhere_hot));
+
+// ============================================================================
+// Default entry point (used by scripts/eval_heat2d_moonlight.py and demos)
+// ============================================================================
+
+formula contain_hotspot =
+  contain;

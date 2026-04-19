@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite the software entry below."
+title: "neural-pde-stl-strel"
+type: software
+abstract: >
+  Reproducible STL/STREL monitoring and training-time regularization for neural
+  PDE surrogates, with committed diffusion and heat case studies plus framework
+  probes for Neuromancer, TorchPhysics, and PhysicsNeMo.
+authors:
+  - family-names: Hu
+    given-names: Arthur
+version: 0.7.9
+date-released: 2026-03-28
+license: MIT
+repository-code: "https://github.com/arthurhu9413/neural-pde-stl-strel"
+url: "https://github.com/arthurhu9413/neural-pde-stl-strel"
+keywords:
+  - neural PDE
+  - PINN
+  - signal temporal logic
+  - STREL
+  - scientific machine learning

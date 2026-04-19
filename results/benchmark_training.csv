@@ -1,0 +1,4 @@
+experiment,config,epochs,wall_time_s,peak_memory_mb,device
+diffusion1d,baseline,400,45.2,512,cpu
+diffusion1d,stl_default,800,108.6,624,cpu
+heat2d,ftcs_rollout,50,0.3,128,cpu

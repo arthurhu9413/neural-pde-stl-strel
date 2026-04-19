@@ -1,0 +1,38 @@
+include .env.example
+include .gitignore
+include CHANGELOG.md
+include CITATION.cff
+include CONTRIBUTING.md
+include LICENSE
+include Makefile
+include README.md
+include pyproject.toml
+include requirements*.txt
+
+graft .github
+graft assets
+graft configs
+graft docs
+graft figs
+graft results
+graft scripts
+graft src
+graft tests
+
+prune .cache
+prune .figure-check
+prune .git
+prune .mplconfig
+prune .pytest_cache
+prune .ruff_cache
+prune .tmp
+prune .venv
+prune build
+prune data
+prune dist
+prune logs
+prune runs
+prune src/neural_pde_stl_strel.egg-info
+
+global-exclude *.py[cod]
+global-exclude .DS_Store

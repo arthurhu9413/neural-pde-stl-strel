@@ -1,0 +1,143 @@
+{
+  "dependencies": {
+    "MoonLight (STREL)": {
+      "applicable": true,
+      "extra": {
+        "java_major": 21,
+        "java_ok_for_moonlight": true,
+        "java_path": "/usr/bin/java",
+        "java_present": true,
+        "java_raw": "openjdk version \"21.0.10\" 2026-01-20"
+      },
+      "imported": false,
+      "message": "module not found",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    },
+    "NeuroMANCER": {
+      "applicable": true,
+      "extra": {},
+      "imported": false,
+      "message": "module not found",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    },
+    "NumPy": {
+      "applicable": true,
+      "extra": {},
+      "imported": true,
+      "message": "OK",
+      "min_version": "1.24.0",
+      "present": true,
+      "required": true,
+      "version": "2.3.5"
+    },
+    "PhysicsNeMo": {
+      "applicable": true,
+      "extra": {},
+      "imported": false,
+      "message": "module not found",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    },
+    "PhysicsNeMo-Sym": {
+      "applicable": true,
+      "extra": {},
+      "imported": false,
+      "message": "module not found",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    },
+    "PyTorch": {
+      "applicable": true,
+      "extra": {
+        "build_cuda": null,
+        "cuda_available": false,
+        "cudnn": null,
+        "mps_available": false
+      },
+      "imported": true,
+      "message": "OK",
+      "min_version": null,
+      "present": true,
+      "required": false,
+      "version": "2.10.0+cpu"
+    },
+    "Python": {
+      "applicable": true,
+      "extra": {},
+      "imported": true,
+      "message": "OK",
+      "min_version": "3.10",
+      "present": true,
+      "required": true,
+      "version": "3.13.5"
+    },
+    "RTAMT (STL)": {
+      "applicable": false,
+      "extra": {
+        "reason": "Python 3.13.5 >= 3.12; RTAMT imports typing.io (removed). Use Python 3.11."
+      },
+      "imported": false,
+      "message": "n/a: Python 3.13.5 >= 3.12; RTAMT imports typing.io (removed). Use Python 3.11.",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    },
+    "SpaTiaL / spatial-spec": {
+      "applicable": true,
+      "extra": {
+        "ltlf2dfa_available": false,
+        "mona_available": false
+      },
+      "imported": false,
+      "message": "module not found",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    },
+    "TorchPhysics": {
+      "applicable": true,
+      "extra": {},
+      "imported": false,
+      "message": "module not found",
+      "min_version": null,
+      "present": false,
+      "required": false,
+      "version": null
+    }
+  },
+  "system": {
+    "cpu": {
+      "brand": "unknown",
+      "cores_logical": 56,
+      "cores_physical": 56
+    },
+    "env": {},
+    "executable": "/opt/pyvenv/bin/python",
+    "gpu": {},
+    "hostname": "bef198e33d10",
+    "is_docker": true,
+    "is_wsl": false,
+    "machine": "x86_64",
+    "memory": {
+      "total_bytes": 4294967296,
+      "total_gib": 4.0
+    },
+    "platform": "Linux-4.4.0-x86_64-with-glibc2.41",
+    "python_implementation": "CPython",
+    "python_version": "3.13.5",
+    "release": "4.4.0",
+    "system": "Linux"
+  }
+}

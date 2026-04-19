@@ -1,0 +1,107 @@
+name: CI
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  standalone:
+    name: Standalone tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+      - name: Install minimal dependencies
+        run: pip install numpy pyyaml
+      - name: Run standalone test suite
+        run: PYTHONPATH=src python tests/run_tests.py
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+      - name: Install linting tools
+        run: pip install ruff
+      - name: Ruff check
+        run: ruff check src/ tests/ scripts/
+
+  figures:
+    name: Figure generation (no PyTorch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+      - name: Install figure dependencies
+        run: pip install -e ".[plot]"
+      - name: Generate and validate figures in scratch space
+        env:
+          MPLBACKEND: Agg
+        run: |
+          python scripts/generate_all_figures.py \
+            --dpi 150 \
+            --output-root .figure-check \
+            --manifest .figure-check/figure_manifest.json \
+            --check
+      - name: Verify figure manifest
+        run: |
+          test -f .figure-check/figure_manifest.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          manifest = json.loads(Path('.figure-check/figure_manifest.json').read_text(encoding='utf-8'))
+          assert manifest['ok'] is True
+          assert manifest['generated_count'] == manifest['expected_count']
+          print(f"Validated {manifest['generated_count']} generated figure artifacts in scratch space.")
+          PY
+
+  full:
+    name: Full test suite (PyTorch)
+    runs-on: ubuntu-latest
+    needs: [standalone, lint, figures]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+      - name: Install CPU-only PyTorch (Linux CI)
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch
+      - name: Install package with dev extras
+        run: pip install -e ".[dev,plot]"
+      - name: Verify committed summary artifacts
+        run: python scripts/refresh_committed_summaries.py --check
+      - name: Run pytest
+        run: python -m pytest tests/ -v --tb=short -x
