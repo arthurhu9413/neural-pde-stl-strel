@@ -1,0 +1,77 @@
+# 2D Heat equation -- scalar STL safety regularization on the repo-native heat2d experiment
+# This is a stepping-stone benchmark: scalar STL on a 2D field before a stronger spatial-STREL-in-the-loop case study.
+experiment: heat2d
+tag: heat2d_stl_safe
+device: auto
+dtype: float32
+
+physics:
+  alpha: 0.5
+  ic_amplitude: 1.0
+  ic_sharpness: 50.0
+  ic_center_x: 0.5
+  ic_center_y: 0.5
+  bcic_weight: 10.0
+  n_boundary: 512
+  n_initial: 512
+
+grid:
+  x_min: 0.0
+  x_max: 1.0
+  y_min: 0.0
+  y_max: 1.0
+  t_min: 0.0
+  t_max: 1.0
+  n_x: 32
+  n_y: 32
+  n_t: 50
+
+model:
+  hidden: [64, 64, 64]
+  activation: tanh
+
+optim:
+  epochs: 200
+  lr: 0.001
+  batch: 4096
+  grad_clip: 1.0
+
+stl:
+  use: true
+  weight: 2.0
+  kind: softplus
+  beta: 10.0
+  smoothmin: 0.1
+  operator: always
+  space_op: forall
+  u_max: 1.0
+  x_min: 0.0
+  x_max: 1.0
+  y_min: 0.0
+  y_max: 1.0
+  t_min: 0.0
+  t_max: 1.0
+  n_x: 24
+  n_y: 24
+  n_t: 24
+  every: 5
+
+strel_audit:
+  export: true
+  run: false
+  packed_field_path: heat2d_field_xy_t.npy
+  dt_path: heat2d_dt.txt
+  layout: xy_t
+  mls_path: scripts/specs/contain_hotspot.mls
+  formula: contain_hotspot
+  binarize: true
+  moonlight: true
+  plots: true
+
+io:
+  results_dir: results
+  tag: heat2d_stl_safe
+  save_ckpt: true
+  save_frames: true
+  save_figs: true
+  print_every: 10

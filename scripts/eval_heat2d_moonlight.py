@@ -1,0 +1,1214 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Evaluate a 2-D heat field against a STREL (spatial STL) specification using MoonLight.
+
+This script is the *2-D spatial* counterpart to the 1-D diffusion + STL demos in this repo.
+It is designed to support (1) a short demo walkthrough and (2) reproducible, figure-generating
+evaluation for the final report.
+
+High-level data flow
+                ┌──────────────────────────┐
+                │  2-D field u(x,y,t)      │  (NumPy .npy)
+                └────────────┬─────────────┘
+                             │  threshold θ (predicate "hot")
+                             ▼
+                ┌──────────────────────────┐
+                │  boolean field hot(x,y,t)│  hot := (u ≥ θ)
+                └────────────┬─────────────┘
+                             │  reshape + graph construction
+                             ▼
+     ┌─────────────────────────────────────────────────────────┐
+     │  spatial model (grid graph) + spatio-temporal signal     │
+     │  graph:  4-neighbor grid, edge attribute "dist"          │
+     │  signal: per-node time series (MoonLight Python format)  │
+     └────────────┬────────────────────────────────────────────┘
+                  │
+                  ▼
+     ┌─────────────────────────────────────────────────────────┐
+     │  MoonLight STREL monitor                                 │
+     │  ScriptLoader.loadFromFile(.mls) -> getMonitor(formula)    │
+     │  monitor.monitor(graph_t, graph, sig_t, sig_values)       │
+     └────────────┬────────────────────────────────────────────┘
+                  │
+                  ▼
+     ┌─────────────────────────────────────────────────────────┐
+     │  outputs                                                 │
+     │  * printed summary (satisfied?, first satisfaction time)  │
+     │  * JSON summary (default: ./results/heat2d_strel_monitoring.json)│
+     │  * figures (default: ./figs/)                            │
+     │      - max temperature vs time                           │
+     │      - quench time vs threshold sensitivity              │
+     │      - MoonLight trace (min across space), if enabled     │
+     └─────────────────────────────────────────────────────────┘
+
+MoonLight signal shape (important)
+MoonLight's *Python* interface for spatio-temporal monitoring expects the signal in
+**node-major order**:
+
+    signal_values[node][time][feature]
+
+and uses the signature:
+
+    monitor.monitor(graph_times, graph, signal_times, signal_values)
+
+This matches the MoonLight wiki's Python spatio-temporal example.
+
+Notes
+-----
+- The default STREL script in this repo treats space as a weighted graph; in this demo we
+  use a 4-neighbor grid with a constant edge weight (interpreted as "distance").
+- By default we binarize the field into a predicate `hot := (u ≥ θ)` because the demo STREL
+  script uses a boolean signal. For boolean-domain specs we encode `hot` as +1 (true) / -1 (false)
+  to match robustness semantics.
+- MoonLight's Python bindings rely on a working Java/JNI stack (via `pyjnius`). If MoonLight
+  is unavailable, you can still generate CPU-only figures with `--no-moonlight`.
+
+Examples
+--------
+Run with repo defaults (recommended; generates figures + JSON):
+    python scripts/eval_heat2d_moonlight.py
+
+Skip MoonLight (CPU-only plots + JSON):
+    python scripts/eval_heat2d_moonlight.py --no-moonlight
+
+Force a specific threshold and skip MoonLight:
+    python scripts/eval_heat2d_moonlight.py --threshold 0.75 --no-moonlight
+
+Monitor multiple formulas from the same .mls file:
+    python scripts/eval_heat2d_moonlight.py --formula contain_hotspot quench
+
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import math
+import os
+import platform
+import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable
+
+import numpy as np
+
+
+# Defaults
+
+
+def _repo_root() -> Path:
+    """Return the repository root assuming this file lives in <root>/scripts/."""
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_field_path() -> Path:
+    """
+    Prefer the generated results field (if present), else fall back to the committed
+    lightweight asset field.
+    """
+    root = _repo_root()
+    cand_results = root / "results" / "heat2d_field_xy_t.npy"
+    cand_assets = root / "assets" / "heat2d_scalar" / "field_xy_t.npy"
+    return cand_results if cand_results.exists() else cand_assets
+
+
+def _default_mls_path() -> Path:
+    return _repo_root() / "scripts" / "specs" / "contain_hotspot.mls"
+
+
+def _default_fig_dir() -> Path:
+    return _repo_root() / "figs"
+
+
+def _default_out_json() -> Path:
+    return _repo_root() / "results" / "heat2d_strel_monitoring.json"
+
+
+# IO helpers
+
+
+def _default_dt_from_sidecar(field_path: Path) -> float | None:
+    """
+    Best-effort dt inference from common sidecar files.
+
+    Supported:
+      - <field_dir>/heat2d_dt.txt           (generated by make targets)
+      - <field_dir>/meta.json              (committed asset metadata)
+    """
+    dt_txt = field_path.parent / "heat2d_dt.txt"
+    if dt_txt.exists():
+        try:
+            txt = dt_txt.read_text(encoding="utf-8").strip()
+            if txt:
+                return float(txt)
+        except Exception:
+            pass
+
+    meta_json = field_path.parent / "meta.json"
+    if meta_json.exists():
+        try:
+            meta = json.loads(meta_json.read_text(encoding="utf-8"))
+            for k in ("realized_dt", "dt"):
+                if k in meta and meta[k] is not None:
+                    return float(meta[k])
+        except Exception:
+            pass
+
+    return None
+
+
+def _infer_dt(field_path: Path, dt_arg: float | None) -> float:
+    """
+    Determine dt for the time axis.
+
+    Priority:
+      1) explicit CLI --dt
+      2) sidecar dt inference (heat2d_dt.txt or meta.json)
+      3) fallback default (0.05, matching the committed heat2d asset)
+    """
+    if dt_arg is not None:
+        if not math.isfinite(dt_arg) or dt_arg <= 0:
+            raise ValueError(f"--dt must be finite and > 0 (got {dt_arg})")
+        return float(dt_arg)
+
+    inferred = _default_dt_from_sidecar(field_path)
+    if inferred is not None and math.isfinite(inferred) and inferred > 0:
+        return float(inferred)
+
+    return 0.05
+
+
+def _load_field_from_npy(path: Path, *, layout: str) -> np.ndarray:
+    """
+    Load a 3-D field from .npy into canonical shape (nx, ny, nt).
+
+    Parameters
+    path:
+        .npy file containing either:
+          - layout='xy_t': (nx, ny, nt)
+          - layout='t_xy': (nt, nx, ny)
+    layout:
+        Either "xy_t" or "t_xy".
+
+    Returns
+    -------
+    field_xy_t:
+        np.ndarray of shape (nx, ny, nt) as float32.
+    """
+    arr = np.load(path)
+    if arr.ndim != 3:
+        raise ValueError(f"Expected a 3D array in {path}, got shape {arr.shape}")
+
+    if layout == "xy_t":
+        field = arr
+    elif layout == "t_xy":
+        field = np.transpose(arr, (1, 2, 0))
+    else:
+        raise ValueError("layout must be 'xy_t' or 't_xy'")
+
+    return np.asarray(field, dtype=np.float32)
+
+
+def _ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _save_json(path: Path, payload: dict[str, Any]) -> None:
+    _ensure_parent_dir(path)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+# Graph + signal conversion
+
+
+def build_grid_graph(nx: int, ny: int, *, weight: float = 1.0) -> tuple[list[float], list[list[list[float]]]]:
+    """
+    Build a 4-neighbor grid graph for MoonLight.
+
+    MoonLight expects a *dynamic* graph representation: `graph_times` and `graph`, where
+    `graph[k]` is the edge list active at time `graph_times[k]`. We use a static graph,
+    hence a single snapshot at time 0.
+
+    Returns
+    -------
+    graph_times:
+        [0.0]
+    graph:
+        [edges] where edges is a list of triples [src, dst, w] (all floats).
+    """
+    if nx <= 0 or ny <= 0:
+        raise ValueError(f"nx and ny must be > 0 (got nx={nx}, ny={ny})")
+    if not math.isfinite(weight) or weight <= 0:
+        raise ValueError(f"weight must be finite and > 0 (got {weight})")
+
+    edges: list[list[float]] = []
+    for i in range(nx):
+        for j in range(ny):
+            v = float(i * ny + j)
+            if i + 1 < nx:
+                u = float((i + 1) * ny + j)
+                edges.append([v, u, float(weight)])
+                edges.append([u, v, float(weight)])
+            if j + 1 < ny:
+                u = float(i * ny + (j + 1))
+                edges.append([v, u, float(weight)])
+                edges.append([u, v, float(weight)])
+
+    return [0.0], [edges]
+
+
+def _field_to_moonlight_signal_node_time(field_xy_t: np.ndarray, *,
+    dt: float) -> tuple[list[float], list[list[list[float]]]]:
+    """
+    Convert (nx, ny, nt) field into MoonLight node-major signal:
+        signal_values[node][time][feature]
+
+    The node index matches `i * ny + j` (row-major flattening).
+    """
+    nx, ny, nt = field_xy_t.shape
+    if nt <= 0:
+        raise ValueError("Field must have nt > 0")
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError("dt must be finite and > 0")
+
+    flat = field_xy_t.reshape(nx * ny, nt)  # (n_nodes, nt)
+    signal_times = (np.arange(nt, dtype=np.float32) * float(dt)).tolist()
+    signal_values = flat[:, :, None].astype(np.float32).tolist()  # (n_nodes, nt, 1) -> list
+    return signal_times, signal_values
+
+
+def _transpose_signal_node_time_to_time_node(signal_node_time: list[list[list[float]]]) -> list[list[list[float]]]:
+    """
+    Convert signal_values[node][time][feature] -> signal_values[time][node][feature].
+
+    Only used as a compatibility fallback if a MoonLight version expects time-major order.
+    """
+    arr = np.asarray(signal_node_time, dtype=np.float32)  # (N, T, F)
+    if arr.ndim != 3:
+        raise ValueError(f"Expected a 3D signal array, got shape {arr.shape}")
+    return np.transpose(arr, (1, 0, 2)).tolist()  # (T, N, F)
+
+
+# MoonLight interaction (optional)
+
+
+def _load_moonlight_scriptloader() -> Any:
+    """
+    Import MoonLight lazily and return ScriptLoader.
+
+    Keeping this import lazy allows `--no-moonlight` runs to succeed without MoonLight.
+    """
+    try:
+        from moonlight import ScriptLoader  # type: ignore
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "MoonLight is not available. Install it (and ensure Java/JNI is configured), "
+            "or re-run with --no-moonlight for CPU-only evaluation."
+        ) from e
+    return ScriptLoader
+
+
+@contextlib.contextmanager
+def _suppress_java_output(enabled: bool) -> Iterable[None]:
+    """
+    Suppress stdout/stderr during Java calls (MoonLight/pyjnius can be noisy).
+
+    Best-effort suppression using file-descriptor redirection, which also catches output
+    emitted by native/JNI layers.
+    """
+    if not enabled:
+        yield
+        return
+
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        old_stdout = os.dup(1)
+        old_stderr = os.dup(2)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        try:
+            yield
+        finally:
+            os.dup2(old_stdout, 1)
+            os.dup2(old_stderr, 2)
+            os.close(old_stdout)
+            os.close(old_stderr)
+            os.close(devnull)
+    except Exception:
+        # If FD redirection fails, fall back to no suppression.
+        yield
+
+
+def _call_monitor_best_effort(
+    monitor: Any,
+    *,
+    graph_times: list[float],
+    graph: list[list[list[float]]],
+    signal_times: list[float],
+    signal_values_node_time: list[list[list[float]]],
+    suppress_output: bool,
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Call MoonLight monitor with best-effort signature compatibility.
+
+    Preferred (node-major signal), per MoonLight wiki:
+        monitor.monitor(graph_times, graph, signal_times, signal_values)
+
+    Fallback:
+      - same signature but time-major signal (rare; for compatibility only)
+    """
+    info: dict[str, Any] = {}
+    t0 = time.perf_counter()
+    with _suppress_java_output(suppress_output):
+        try:
+            out = monitor.monitor(graph_times, graph, signal_times, signal_values_node_time)
+            info["call"] = "monitor(graph_t, graph, sig_t, sig[node][t][f])"
+            info["monitor_s"] = time.perf_counter() - t0
+            return out, info
+        except TypeError as e:
+            info["primary_type_error"] = str(e)
+
+        # Compatibility fallback: transpose to time-major.
+        signal_time_node = _transpose_signal_node_time_to_time_node(signal_values_node_time)
+        out = monitor.monitor(graph_times, graph, signal_times, signal_time_node)
+        info["call"] = "monitor(graph_t, graph, sig_t, sig[t][node][f])"
+        info["monitor_s"] = time.perf_counter() - t0
+        return out, info
+
+
+def _summarize_spatiotemporal_output(out: Any, *,
+    time_axis: list[float] | None) -> tuple[dict[str, Any], np.ndarray | None]:
+    """
+    Best-effort summary for MoonLight output.
+
+    For spatio-temporal formulas, MoonLight typically returns an array-like object whose
+    first dimension is time. Remaining dimensions correspond to locations (and possibly
+    features). We reduce across the non-time dimensions by taking the minimum, yielding a
+    conservative "worst location" trace.
+
+    Returns (summary, per_time_min_trace).
+    """
+    if out is None:
+        return {"out_is_none": True}, None
+
+    try:
+        arr = np.asarray(out, dtype=float)
+    except Exception:
+        try:
+            arr = np.asarray(list(out), dtype=float)
+        except Exception as e:
+            return {"out_unconvertible": True, "error": str(e), "out_type": str(type(out))}, None
+
+    summary: dict[str, Any] = {"out_shape": list(arr.shape), "out_ndim": int(arr.ndim)}
+
+    # Temporal monitors often return a 2-column [time, value] matrix.
+    if arr.ndim == 2 and arr.shape[1] == 2:
+        summary["detected_time_value_matrix"] = True
+        per_time = arr[:, 1]
+        summary["out_time_min"] = float(np.nanmin(arr[:, 0]))
+        summary["out_time_max"] = float(np.nanmax(arr[:, 0]))
+    else:
+        if arr.ndim == 0:
+            per_time = arr.reshape(1)
+        elif arr.ndim == 1:
+            per_time = arr
+        else:
+            per_time = np.nanmin(arr, axis=tuple(range(1, arr.ndim)))
+
+    summary["per_time_shape"] = list(per_time.shape)
+    summary["per_time_min"] = float(np.nanmin(per_time))
+    summary["per_time_max"] = float(np.nanmax(per_time))
+
+    satisfied_idx = np.where(per_time > 0)[0]
+    summary["satisfied_eventually"] = bool(satisfied_idx.size > 0)
+    if satisfied_idx.size > 0:
+        first_idx = int(satisfied_idx[0])
+        summary["first_satisfaction_index"] = first_idx
+        if time_axis is not None and 0 <= first_idx < len(time_axis):
+            summary["first_satisfaction_time"] = float(time_axis[first_idx])
+
+    return summary, per_time
+
+
+# CPU-only analysis helpers (useful even when MoonLight is unavailable)
+
+
+def _future_max_trace(max_temp: np.ndarray) -> np.ndarray:
+    """Compute future maximum: f[t] = max(max_temp[t:])."""
+    rev = max_temp[::-1]
+    rev_acc = np.maximum.accumulate(rev)
+    return rev_acc[::-1]
+
+
+@dataclass(frozen=True)
+class QuenchResult:
+    """CPU-only quench-time summary for a given threshold."""
+    threshold: float
+    has_quench: bool
+    quench_index: int | None
+    quench_time: float | None
+    quench_time_norm: float
+
+
+def _compute_quench_time(*, max_temp: np.ndarray, dt: float, threshold: float) -> QuenchResult:
+    """
+    CPU-only quench time for predicate hot := (u ≥ threshold).
+
+    We define quench time t_q as the earliest time such that *for all later times* the
+    maximum temperature is strictly below the threshold (i.e., no points are hot).
+
+    If the property never quenches within the trace, we report quench_time_norm = 1.0
+    and (quench_index, quench_time) as None.
+    """
+    if max_temp.ndim != 1:
+        raise ValueError("max_temp must be 1-D")
+    nt = int(max_temp.shape[0])
+    if nt == 0:
+        raise ValueError("max_temp must be non-empty")
+    if not math.isfinite(dt) or dt <= 0:
+        raise ValueError("dt must be finite and > 0")
+    if not math.isfinite(threshold):
+        raise ValueError("threshold must be finite")
+
+    future_max = _future_max_trace(max_temp)
+    mask = future_max < threshold  # strict: u >= θ is hot
+    if mask.any():
+        idx = int(np.argmax(mask))  # first True
+        tq = float(idx) * float(dt)
+        tq_norm = float(idx) / float(nt - 1) if nt > 1 else 0.0
+        return QuenchResult(
+            threshold=threshold, has_quench=True, quench_index=idx,
+            quench_time=tq, quench_time_norm=tq_norm,
+        )
+
+    return QuenchResult(
+        threshold=threshold, has_quench=False, quench_index=None,
+        quench_time=None, quench_time_norm=1.0,
+    )
+
+
+def _threshold_from_field(
+    field_xy_t: np.ndarray,
+    *,
+    threshold: float | None,
+    z_k: float | None,
+    quantile: float | None,
+) -> tuple[float, dict[str, Any]]:
+    """
+    Choose a threshold θ for hot := (u ≥ θ), returning (θ, details).
+
+    Precedence:
+      1) explicit --threshold
+      2) z-score --z-k: θ = mean + k·std
+      3) quantile --quantile: θ = quantile(u, q)
+      4) fallback: quantile at q=0.995 (sensible default for this demo)
+    """
+    flat = field_xy_t.reshape(-1).astype(np.float64)
+    mu = float(np.mean(flat))
+    sigma = float(np.std(flat))
+    q_default = 0.995 if quantile is None else float(quantile)
+
+    details: dict[str, Any] = {
+        "mean": mu,
+        "std": sigma,
+        "min": float(np.min(flat)),
+        "max": float(np.max(flat)),
+    }
+
+    if threshold is not None:
+        if not math.isfinite(threshold):
+            raise ValueError(f"--threshold must be finite (got {threshold})")
+        details["method"] = "explicit"
+        return float(threshold), details
+
+    if z_k is not None:
+        if not math.isfinite(z_k):
+            raise ValueError(f"--z-k must be finite (got {z_k})")
+        details["method"] = "zscore"
+        details["z_k"] = float(z_k)
+        return mu + float(z_k) * sigma, details
+
+    if not (0.0 < q_default < 1.0):
+        raise ValueError(f"--quantile must be in (0,1) (got {q_default})")
+    details["method"] = "quantile"
+    details["quantile"] = q_default
+    return float(np.quantile(flat, q_default)), details
+
+
+def _spec_needs_boolean_signal(mls_text: str) -> bool:
+    """
+    Heuristic: does the .mls declare (or imply) boolean signals?
+
+    We use this only to pick a sensible default for whether we should binarize u(x,y,t)
+    into a predicate `hot`. For this heat demo, binarization is almost always desired.
+    """
+    txt = re.sub(r"//.*$", "", mls_text, flags=re.MULTILINE)  # strip single-line comments
+
+    # Case 1: block syntax: signal { bool hot; }
+    if re.search(r"\bsignal\s*\{[^}]*\bbool\b", txt):
+        return True
+
+    # Case 2: bare syntax: signal hot;
+    if re.search(r"\bsignal\s+(?!\{)[A-Za-z_]\w*\s*;", txt):
+        return True
+
+    # Explicit real-valued signals: likely no binarization by default.
+    if re.search(r"\bsignal\s*\{[^}]*\breal\b", txt):
+        return False
+
+    # Fallback: boolean domain often pairs with boolean signals.
+    if re.search(r"\bdomain\s+boolean\s*;", txt):
+        return True
+
+    return False
+
+
+def _parse_time_slice_indices(*, nt: int, dt: float, t_start: float | None, t_end: float | None) -> tuple[int, int]:
+    """Convert optional [t_start, t_end) into integer indices [i0, i1)."""
+    if t_start is None:
+        i0 = 0
+    else:
+        if not math.isfinite(t_start):
+            raise ValueError("--t-start must be finite")
+        i0 = int(math.floor(float(t_start) / float(dt)))
+    if t_end is None:
+        i1 = nt
+    else:
+        if not math.isfinite(t_end):
+            raise ValueError("--t-end must be finite")
+        i1 = int(math.ceil(float(t_end) / float(dt)))
+
+    i0 = max(0, min(nt, i0))
+    i1 = max(i0, min(nt, i1))
+    return i0, i1
+
+
+# Plotting
+
+
+def _import_matplotlib_pyplot():
+    # Headless-safe: force a non-interactive backend.
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt  # type: ignore
+
+    return plt
+
+
+def _plot_max_temp(
+    *,
+    t_norm: np.ndarray,
+    max_temp: np.ndarray,
+    theta: float | None,
+    out_path: Path,
+    title: str,
+) -> None:
+    plt = _import_matplotlib_pyplot()
+    _ensure_parent_dir(out_path)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(t_norm, max_temp, linewidth=2.0, label="max(u)")
+    if theta is not None and math.isfinite(theta):
+        ax.axhline(theta, linestyle="--", linewidth=1.5, label=f"θ={theta:.4g}")
+    ax.set_xlabel("normalized time (t / T)")
+    ax.set_ylabel("max temperature")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def _plot_quench_sweep(
+    *,
+    thresholds: np.ndarray,
+    tq_norm: np.ndarray,
+    out_path: Path,
+    title: str,
+    theta_marker: float | None,
+) -> None:
+    plt = _import_matplotlib_pyplot()
+    _ensure_parent_dir(out_path)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(thresholds, tq_norm, linewidth=2.0, label="quench time (normalized)")
+    if theta_marker is not None and math.isfinite(theta_marker):
+        ax.axvline(theta_marker, linestyle="--", linewidth=1.5, label="θ used")
+    ax.set_xlabel("threshold θ")
+    ax.set_ylabel("normalized quench time (t_q / T)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+def _plot_monitor_trace(
+    *,
+    t_norm: np.ndarray,
+    per_time: np.ndarray,
+    out_path: Path,
+    title: str,
+) -> None:
+    plt = _import_matplotlib_pyplot()
+    _ensure_parent_dir(out_path)
+
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.plot(t_norm, per_time, linewidth=2.0)
+    ax.set_xlabel("normalized time (t / T)")
+    ax.set_ylabel("min across space (monitor output)")
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=200)
+    plt.close(fig)
+
+
+# Environment metadata (for empirical reporting)
+
+
+def _java_version_string() -> str | None:
+    """Best-effort `java -version` capture (returns first line, if available)."""
+    try:
+        proc = subprocess.run(
+            ["java", "-version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        s = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return s[0].strip() if s else None
+    except Exception:
+        return None
+
+
+def _cpu_model_string() -> str | None:
+    """Best-effort CPU model string (Linux /proc/cpuinfo, else platform.processor())."""
+    try:
+        if sys.platform.startswith("linux"):
+            txt = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"^model name\s*:\s*(.+)$", txt, flags=re.MULTILINE)
+            if m:
+                return m.group(1).strip()
+    except Exception:
+        pass
+    try:
+        s = platform.processor()
+        return s.strip() if s else None
+    except Exception:
+        return None
+
+
+def _total_ram_gib() -> float | None:
+    """Best-effort total RAM in GiB (Linux /proc/meminfo)."""
+    try:
+        if sys.platform.startswith("linux"):
+            txt = Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r"^MemTotal:\s+(\d+)\s+kB", txt, flags=re.MULTILINE)
+            if m:
+                kb = float(m.group(1))
+                return kb / (1024.0 * 1024.0)
+    except Exception:
+        pass
+    return None
+
+
+def _env_info() -> dict[str, Any]:
+    """Collect lightweight environment/hardware metadata for empirical reports."""
+    info: dict[str, Any] = {
+        "python_version": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "cpu_count_logical": os.cpu_count(),
+        "cpu_model": _cpu_model_string(),
+        "ram_gib": _total_ram_gib(),
+        "numpy_version": np.__version__,
+        "java_version": _java_version_string(),
+    }
+
+    # Optional torch GPU details (helpful if run on a GPU box).
+    try:
+        import torch  # type: ignore
+
+        info["torch_version"] = getattr(torch, "__version__", None)
+        info["cuda_available"] = bool(torch.cuda.is_available())
+        if torch.cuda.is_available():
+            info["cuda_device_name"] = torch.cuda.get_device_name(0)
+            info["cuda_device_count"] = int(torch.cuda.device_count())
+    except Exception:
+        pass
+
+    # Optional MoonLight version.
+    try:
+        import moonlight  # type: ignore
+
+        info["moonlight_version"] = getattr(moonlight, "__version__", None)
+    except Exception:
+        pass
+
+    return info
+
+
+# CLI + main
+
+
+def _format_float(x: float | None, *, ndigits: int = 6) -> str:
+    if x is None:
+        return "None"
+    if not math.isfinite(x):
+        return str(x)
+    return f"{x:.{ndigits}g}"
+
+
+def main(argv: list[str] | None = None) -> int:
+    t_total0 = time.perf_counter()
+    timing: dict[str, float] = {}
+
+    p = argparse.ArgumentParser(
+        description="Evaluate 2-D heat field with MoonLight STREL and generate plots.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    p.add_argument(
+        "--field",
+        type=Path,
+        default=_default_field_path(),
+        help="Path to .npy field file. Expected shape depends on --layout.",
+    )
+    p.add_argument(
+        "--layout",
+        type=str,
+        default="xy_t",
+        choices=("xy_t", "t_xy"),
+        help="Field layout in the .npy file.",
+    )
+    p.add_argument(
+        "--dt",
+        type=float,
+        default=None,
+        help="Time step. If omitted, infer from heat2d_dt.txt or meta.json, else 0.05.",
+    )
+    p.add_argument("--t-start", type=float, default=None, help="Start time (inclusive) for slicing.")
+    p.add_argument("--t-end", type=float, default=None, help="End time (exclusive) for slicing.")
+    p.add_argument(
+        "--adj-weight",
+        type=float,
+        default=1.0,
+        help="Grid graph edge weight used as the spatial distance attribute (dist).",
+    )
+
+    p.add_argument(
+        "--mls",
+        type=Path,
+        default=_default_mls_path(),
+        help="MoonLight .mls specification file.",
+    )
+    p.add_argument(
+        "--formula",
+        type=str,
+        nargs="+",
+        default=["contain_hotspot"],
+        help="One or more formula names (or parameterized formula calls) to monitor.",
+    )
+
+    bin_group = p.add_mutually_exclusive_group()
+    bin_group.add_argument(
+        "--binarize",
+        dest="binarize",
+        action="store_true",
+        help="Force binarization hot := (u ≥ θ) before monitoring.",
+    )
+    bin_group.add_argument(
+        "--no-binarize",
+        dest="binarize",
+        action="store_false",
+        help="Disable binarization; pass raw real-valued field to MoonLight.",
+    )
+    p.set_defaults(binarize=None)
+
+    p.add_argument("--threshold", type=float, default=None, help="Explicit threshold θ for hot := (u ≥ θ).")
+    p.add_argument("--z-k", type=float, default=None, help="Threshold via θ = mean(u) + k·std(u).")
+    p.add_argument(
+        "--quantile",
+        type=float,
+        default=None,
+        help="Threshold via θ = quantile(u, q). If omitted, defaults to q=0.995 when binarizing.",
+    )
+
+    p.add_argument(
+        "--moonlight",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run MoonLight monitoring (requires Java/JNI).",
+    )
+    p.add_argument(
+        "--suppress-java-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Suppress noisy Java/JNI stdout/stderr during MoonLight calls.",
+    )
+
+    p.add_argument(
+        "--plots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Generate figures under --fig-dir.",
+    )
+    p.add_argument("--fig-dir", type=Path, default=_default_fig_dir(), help="Directory for saved figures.")
+
+    p.add_argument(
+        "--sweep",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Compute and plot quench-time sensitivity over a threshold range (CPU-only).",
+    )
+    p.add_argument("--sweep-num", type=int, default=50, help="Number of thresholds in the sweep.")
+    p.add_argument("--sweep-theta-min", type=float, default=None, help="Absolute min θ for sweep.")
+    p.add_argument("--sweep-theta-max", type=float, default=None, help="Absolute max θ for sweep.")
+    p.add_argument(
+        "--sweep-frac-min",
+        type=float,
+        default=0.2,
+        help="Min θ as a fraction of max(u) if absolute bounds not set.",
+    )
+    p.add_argument(
+        "--sweep-frac-max",
+        type=float,
+        default=0.9,
+        help="Max θ as a fraction of max(u) if absolute bounds not set.",
+    )
+
+    p.add_argument(
+        "--json",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write a JSON summary to --out-json.",
+    )
+    p.add_argument("--out-json", type=Path, default=_default_out_json(), help="JSON output path.")
+
+    args = p.parse_args(argv)
+
+    # Resolve and validate paths.
+    field_path = args.field
+    if not field_path.exists():
+        raise FileNotFoundError(f"Field file not found: {field_path}")
+
+    mls_path = args.mls
+    if args.moonlight and not mls_path.exists():
+        raise FileNotFoundError(f"MoonLight .mls not found: {mls_path}")
+
+    t0 = time.perf_counter()
+    dt = _infer_dt(field_path, args.dt)
+    timing["infer_dt_s"] = time.perf_counter() - t0
+
+    # Load and slice field.
+    t0 = time.perf_counter()
+    field_xy_t_full = _load_field_from_npy(field_path, layout=args.layout)
+    timing["load_field_s"] = time.perf_counter() - t0
+
+    nx, ny, nt_full = field_xy_t_full.shape
+
+    t0 = time.perf_counter()
+    i0, i1 = _parse_time_slice_indices(nt=nt_full, dt=dt, t_start=args.t_start, t_end=args.t_end)
+    field_xy_t = field_xy_t_full[:, :, i0:i1]
+    timing["slice_field_s"] = time.perf_counter() - t0
+
+    nt = int(field_xy_t.shape[2])
+    if nt == 0:
+        raise ValueError("Time slice is empty; adjust --t-start/--t-end.")
+
+    # Derived traces.
+    t0 = time.perf_counter()
+    max_temp = np.max(field_xy_t, axis=(0, 1)).astype(np.float64)
+    t = np.arange(nt, dtype=np.float64) * float(dt)
+    t_norm = t / t[-1] if t[-1] > 0 else np.zeros_like(t)
+    timing["derive_traces_s"] = time.perf_counter() - t0
+
+    # Decide whether to binarize.
+    t0 = time.perf_counter()
+    spec_text = mls_path.read_text(encoding="utf-8") if mls_path.exists() else ""
+    spec_wants_bool = _spec_needs_boolean_signal(spec_text) if spec_text else True
+    do_binarize = spec_wants_bool if args.binarize is None else bool(args.binarize)
+    timing["read_spec_s"] = time.perf_counter() - t0
+
+    theta: float | None = None
+    theta_details: dict[str, Any] | None = None
+
+    t0 = time.perf_counter()
+    if do_binarize:
+        theta, theta_details = _threshold_from_field(
+            field_xy_t, threshold=args.threshold, z_k=args.z_k, quantile=args.quantile
+        )
+        hot_mask = field_xy_t >= float(theta)
+        # Encode booleans as ±1 for MoonLight's boolean (robustness) semantics.
+        signal_field = np.where(hot_mask, 1.0, -1.0).astype(np.float32)
+        hot_fraction_overall = float(np.mean(hot_mask))
+        hot_fraction_by_time = np.mean(hot_mask, axis=(0, 1)).astype(np.float64).tolist()
+    else:
+        signal_field = field_xy_t
+        hot_fraction_overall = None
+        hot_fraction_by_time = None
+    timing["prepare_signal_field_s"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    signal_times, signal_values_node_time = _field_to_moonlight_signal_node_time(signal_field, dt=dt)
+    timing["field_to_signal_s"] = time.perf_counter() - t0
+
+    t0 = time.perf_counter()
+    graph_times, graph = build_grid_graph(nx, ny, weight=args.adj_weight)
+    timing["build_graph_s"] = time.perf_counter() - t0
+
+    # CPU-only quench time for θ (if binarizing).
+    t0 = time.perf_counter()
+    cpu_quench: QuenchResult | None = None
+    if theta is not None:
+        cpu_quench = _compute_quench_time(max_temp=max_temp, dt=dt, threshold=float(theta))
+    timing["cpu_quench_s"] = time.perf_counter() - t0
+
+    # Threshold sweep (CPU-only).
+    t0 = time.perf_counter()
+    sweep_payload: dict[str, Any] | None = None
+    if args.sweep and nt > 1:
+        if args.sweep_num < 2:
+            raise ValueError("--sweep-num must be >= 2")
+
+        if (args.sweep_theta_min is None) != (args.sweep_theta_max is None):
+            raise ValueError("Provide both --sweep-theta-min and --sweep-theta-max, or neither.")
+
+        if args.sweep_theta_min is not None and args.sweep_theta_max is not None:
+            sweep_min = float(args.sweep_theta_min)
+            sweep_max = float(args.sweep_theta_max)
+        else:
+            if not (0.0 < args.sweep_frac_min < args.sweep_frac_max):
+                raise ValueError("--sweep-frac-min must be < --sweep-frac-max and both in (0,1) for default sweep.")
+            base = float(np.max(max_temp))
+            sweep_min = float(args.sweep_frac_min) * base
+            sweep_max = float(args.sweep_frac_max) * base
+
+        thresholds = np.linspace(sweep_min, sweep_max, int(args.sweep_num), dtype=np.float64)
+        tq_norm_list: list[float] = []
+        tq_time_list: list[float | None] = []
+        tq_idx_list: list[int | None] = []
+        tq_has_list: list[bool] = []
+
+        for thr in thresholds:
+            qr = _compute_quench_time(max_temp=max_temp, dt=dt, threshold=float(thr))
+            tq_norm_list.append(float(qr.quench_time_norm))
+            tq_time_list.append(qr.quench_time)
+            tq_idx_list.append(qr.quench_index)
+            tq_has_list.append(bool(qr.has_quench))
+
+        sweep_payload = {
+            "thresholds": thresholds.tolist(),
+            "quench_time_norm": tq_norm_list,
+            "quench_time": tq_time_list,
+            "quench_index": tq_idx_list,
+            "has_quench": tq_has_list,
+        }
+    timing["cpu_sweep_s"] = time.perf_counter() - t0
+
+    # MoonLight monitors.
+    t0 = time.perf_counter()
+    moonlight_payload: dict[str, Any] = {"enabled": bool(args.moonlight)}
+    monitor_traces: dict[str, list[float]] = {}
+    if not args.moonlight:
+        moonlight_payload["status"] = "skipped"
+    else:
+        ScriptLoader = _load_moonlight_scriptloader()
+        moonlight_payload["status"] = "attempted"
+        moonlight_payload["script"] = str(mls_path)
+        moonlight_payload["formulas"] = list(args.formula)
+
+        t_load = time.perf_counter()
+        mls = ScriptLoader.loadFromFile(str(mls_path))
+        moonlight_payload["load_script_s"] = time.perf_counter() - t_load
+
+        per_formula: dict[str, Any] = {}
+        for fml in args.formula:
+            entry: dict[str, Any] = {}
+            try:
+                t_get = time.perf_counter()
+                monitor = mls.getMonitor(fml)
+                entry["get_monitor_s"] = time.perf_counter() - t_get
+
+                raw_out, call_info = _call_monitor_best_effort(
+                    monitor,
+                    graph_times=graph_times,
+                    graph=graph,
+                    signal_times=signal_times,
+                    signal_values_node_time=signal_values_node_time,
+                    suppress_output=bool(args.suppress_java_output),
+                )
+                entry["call_info"] = call_info
+                summary, per_time = _summarize_spatiotemporal_output(raw_out, time_axis=signal_times)
+                entry["summary"] = summary
+                if per_time is not None:
+                    monitor_traces[fml] = [float(x) for x in per_time.tolist()]
+            except Exception as e:
+                entry["error"] = str(e)
+                entry["error_type"] = type(e).__name__
+            per_formula[fml] = entry
+
+        moonlight_payload["results"] = per_formula
+    timing["moonlight_s"] = time.perf_counter() - t0
+
+    # Figures.
+    t0 = time.perf_counter()
+    fig_paths: dict[str, str] = {}
+    if args.plots:
+        args.fig_dir.mkdir(parents=True, exist_ok=True)
+
+        max_fig = args.fig_dir / "heat2d_max_temp_vs_time.png"
+        _plot_max_temp(
+            t_norm=t_norm,
+            max_temp=max_temp,
+            theta=theta,
+            out_path=max_fig,
+            title="2-D heat sandbox: max temperature vs time",
+        )
+        fig_paths["max_temp_vs_time"] = str(max_fig)
+
+        if sweep_payload is not None:
+            sweep_fig = args.fig_dir / "heat2d_quench_time_vs_threshold.png"
+            _plot_quench_sweep(
+                thresholds=np.asarray(sweep_payload["thresholds"], dtype=np.float64),
+                tq_norm=np.asarray(sweep_payload["quench_time_norm"], dtype=np.float64),
+                out_path=sweep_fig,
+                title="2-D heat sandbox: quench time sensitivity to θ",
+                theta_marker=theta,
+            )
+            fig_paths["quench_time_vs_threshold"] = str(sweep_fig)
+
+        for fml, trace in monitor_traces.items():
+            safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", fml)
+            out_path = args.fig_dir / f"heat2d_moonlight_trace_{safe}.png"
+            _plot_monitor_trace(
+                t_norm=t_norm,
+                per_time=np.asarray(trace, dtype=np.float64),
+                out_path=out_path,
+                title=f"MoonLight output (min across space): {fml}",
+            )
+            fig_paths[f"moonlight_trace:{fml}"] = str(out_path)
+    timing["plots_s"] = time.perf_counter() - t0
+
+    timing["total_s"] = time.perf_counter() - t_total0
+
+    # JSON payload.
+    payload: dict[str, Any] = {
+        "timestamp_unix": time.time(),
+        "timing_s": timing,
+        "inputs": {
+            "field": str(field_path),
+            "layout": args.layout,
+            "nx": int(nx),
+            "ny": int(ny),
+            "nt": int(nt),
+            "dt": float(dt),
+            "time_slice": {"i0": int(i0), "i1": int(i1), "t_start": args.t_start, "t_end": args.t_end},
+        },
+        "spec": {
+            "path": str(mls_path),
+            "text": spec_text if spec_text else None,
+        },
+        "graph": {
+            "type": "grid_4n",
+            "adj_weight": float(args.adj_weight),
+            "n_nodes": int(nx * ny),
+            "n_edges": int(len(graph[0])),
+        },
+        "signal": {
+            "n_nodes": int(nx * ny),
+            "n_times": int(nt),
+            "n_features": 1,
+            "binarized": bool(do_binarize),
+            "hot_fraction_overall": hot_fraction_overall,
+            "hot_fraction_by_time": hot_fraction_by_time,
+        },
+        "binarization": {
+            "enabled": bool(do_binarize),
+            "theta": float(theta) if theta is not None else None,
+            "theta_details": theta_details,
+        },
+        "cpu_metrics": {
+            "max_temp_min": float(np.min(max_temp)),
+            "max_temp_max": float(np.max(max_temp)),
+            "max_temp_initial": float(max_temp[0]),
+            "max_temp_final": float(max_temp[-1]),
+            "quench": None
+            if cpu_quench is None
+            else {
+                "has_quench": bool(cpu_quench.has_quench),
+                "quench_index": cpu_quench.quench_index,
+                "quench_time": cpu_quench.quench_time,
+                "quench_time_norm": float(cpu_quench.quench_time_norm),
+            },
+            "sweep": sweep_payload,
+        },
+        "moonlight": moonlight_payload,
+        "figures": fig_paths,
+        "env": _env_info(),
+    }
+
+    # Console summary (demo-friendly).
+    print("== Heat2D + MoonLight evaluation ==")
+    print(f"Field:   {field_path}  (layout={args.layout}, shape={nx}×{ny}×{nt})")
+    print(f"dt:      {dt}   (slice indices: [{i0}:{i1}))")
+    print(f"Graph:   nodes={nx*ny}, edges={len(graph[0])}, weight={args.adj_weight}")
+    if do_binarize:
+        method = theta_details.get("method") if theta_details else "n/a"
+        print(f"Hot predicate: hot := (u ≥ θ), θ={_format_float(theta)}  [{method}]")
+        if hot_fraction_overall is not None:
+            print(f"Hot fraction: {hot_fraction_overall:.3f} (overall over x,y,t)")
+        if cpu_quench is not None:
+            print(
+                f"CPU quench:   has_quench={cpu_quench.has_quench}, "
+                f"t_q={_format_float(cpu_quench.quench_time)}, "
+                f"t_q/T={cpu_quench.quench_time_norm:.3f}"
+            )
+    else:
+        print("Hot predicate: (disabled) using raw real-valued u(x,y,t)")
+
+    if not args.moonlight:
+        print("MoonLight: skipped (--no-moonlight)")
+    else:
+        print(f"MoonLight: script={mls_path}, formulas={args.formula}")
+        per_formula = moonlight_payload.get("results", {})
+        for fml in args.formula:
+            entry = per_formula.get(fml, {})
+            if "error" in entry:
+                print(f"  - {fml}: ERROR ({entry.get('error_type')}): {entry.get('error')}")
+                continue
+            summ = entry.get("summary", {})
+            sat = summ.get("satisfied_eventually")
+            first_t = summ.get("first_satisfaction_time")
+            print(f"  - {fml}: satisfied_eventually={sat}, first_satisfaction_time={_format_float(first_t)}")
+
+    if args.json:
+        _save_json(args.out_json, payload)
+        print(f"Wrote JSON: {args.out_json}")
+
+    if fig_paths:
+        print("Figures:")
+        for k, v in fig_paths.items():
+            print(f"  - {k}: {v}")
+
+    print(f"Total runtime: {timing['total_s']:.3f}s")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

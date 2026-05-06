@@ -1,0 +1,49 @@
+{
+  "experiment": "diffusion1d_main",
+  "cases": {
+    "baseline": {
+      "pde_mse": 0.00010498607298359275,
+      "peak_value": 1.003968596458435,
+      "final_spatial_max": 0.37497997283935547,
+      "safety_rho": -0.003968596458435059,
+      "safety_satisfied": false,
+      "cool_tight_rho": -0.07497996091842651,
+      "cool_tight_satisfied": false,
+      "cool_loose_rho": 0.02502003312110901,
+      "cool_loose_satisfied": true,
+      "centerline_cool_tight_rho": -0.07489228248596191,
+      "grid_shape": [
+        128,
+        64
+      ],
+      "dt": 0.01587301678955555,
+      "alpha": 0.1,
+      "checkpoint": "results/diffusion1d_baseline.pt",
+      "field_artifact": "results/diffusion1d_baseline_field.pt",
+      "epochs": 400,
+      "stl_weight": 0.0
+    },
+    "stl": {
+      "pde_mse": 0.024336576461791992,
+      "peak_value": 0.6562209129333496,
+      "final_spatial_max": 0.2503321170806885,
+      "safety_rho": 0.3437790870666504,
+      "safety_satisfied": true,
+      "cool_tight_rho": 0.04966789484024048,
+      "cool_tight_satisfied": true,
+      "cool_loose_rho": 0.149667888879776,
+      "cool_loose_satisfied": true,
+      "centerline_cool_tight_rho": 0.04966789484024048,
+      "grid_shape": [
+        128,
+        64
+      ],
+      "dt": 0.01587301678955555,
+      "alpha": 0.1,
+      "checkpoint": "results/diffusion1d_stl.pt",
+      "field_artifact": "results/diffusion1d_stl_field.pt",
+      "epochs": 800,
+      "stl_weight": 5.0
+    }
+  }
+}

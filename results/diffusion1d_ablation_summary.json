@@ -1,0 +1,101 @@
+{
+  "experiment": "diffusion1d_lambda_ablation",
+  "derived_from": {
+    "checkpoints": [
+      "results/diffusion1d_abl_w0_s0.pt",
+      "results/diffusion1d_abl_w2_s0.pt",
+      "results/diffusion1d_abl_w4_s0.pt",
+      "results/diffusion1d_abl_w6_s0.pt",
+      "results/diffusion1d_abl_w8_s0.pt",
+      "results/diffusion1d_abl_w10_s0.pt"
+    ],
+    "analytic_reference": "u(x,t) = sin(pi x) exp(-alpha pi^2 t)",
+    "safety_spec": "G_[0,1](max_x u(x,t) <= 1.0)",
+    "cooling_spec_tight": "F_[0.8,1](max_x u(x,t) <= 0.3)",
+    "cooling_spec_loose": "F_[0.8,1](max_x u(x,t) <= 0.4)"
+  },
+  "notes": [
+    "The ablation sweep is separate from the main baseline/STL comparison.",
+    "Metrics are recomputed from committed dense-field artifacts when available, with checkpoint evaluation reserved for explicit refresh/fallback paths.",
+    "Wall time is estimated from the two diffusion rows in results/benchmark_training.csv and then interpolated/extrapolated across lambda values."
+  ],
+  "sweeps": [
+    {
+      "lambda": 0,
+      "pde_mse": 0.0007456644671037793,
+      "safety_rho": 0.03967595100402832,
+      "cooling_rho_tight": -0.06216731667518616,
+      "cooling_rho_loose": 0.037832677364349365,
+      "peak_value": 0.9603240489959717,
+      "final_spatial_max": 0.3621673285961151,
+      "wall_time_s_estimate": 45.2,
+      "source_checkpoint": "results/diffusion1d_abl_w0_s0.pt",
+      "source_field": "results/diffusion1d_abl_w0_s0_field.pt"
+    },
+    {
+      "lambda": 2,
+      "pde_mse": 0.008022280409932137,
+      "safety_rho": 0.16161757707595825,
+      "cooling_rho_tight": 0.005826324224472046,
+      "cooling_rho_loose": 0.10582631826400757,
+      "peak_value": 0.8383824229240417,
+      "final_spatial_max": 0.2941736876964569,
+      "wall_time_s_estimate": 70.56,
+      "source_checkpoint": "results/diffusion1d_abl_w2_s0.pt",
+      "source_field": "results/diffusion1d_abl_w2_s0_field.pt"
+    },
+    {
+      "lambda": 4,
+      "pde_mse": 0.01491787750273943,
+      "safety_rho": 0.22162789106369019,
+      "cooling_rho_tight": 0.03906962275505066,
+      "cooling_rho_loose": 0.13906961679458618,
+      "peak_value": 0.7783721089363098,
+      "final_spatial_max": 0.2609303891658783,
+      "wall_time_s_estimate": 95.91999999999999,
+      "source_checkpoint": "results/diffusion1d_abl_w4_s0.pt",
+      "source_field": "results/diffusion1d_abl_w4_s0_field.pt"
+    },
+    {
+      "lambda": 6,
+      "pde_mse": 0.02074463665485382,
+      "safety_rho": 0.26207756996154785,
+      "cooling_rho_tight": 0.061298713088035583,
+      "cooling_rho_loose": 0.1612987071275711,
+      "peak_value": 0.7379224300384521,
+      "final_spatial_max": 0.23870129883289337,
+      "wall_time_s_estimate": 121.27999999999999,
+      "source_checkpoint": "results/diffusion1d_abl_w6_s0.pt",
+      "source_field": "results/diffusion1d_abl_w6_s0_field.pt"
+    },
+    {
+      "lambda": 8,
+      "pde_mse": 0.025973640382289886,
+      "safety_rho": 0.2924523949623108,
+      "cooling_rho_tight": 0.07942730188369751,
+      "cooling_rho_loose": 0.17942729592323303,
+      "peak_value": 0.7075476050376892,
+      "final_spatial_max": 0.22057271003723145,
+      "wall_time_s_estimate": 146.64,
+      "source_checkpoint": "results/diffusion1d_abl_w8_s0.pt",
+      "source_field": "results/diffusion1d_abl_w8_s0_field.pt"
+    },
+    {
+      "lambda": 10,
+      "pde_mse": 0.030321957543492317,
+      "safety_rho": 0.31647950410842896,
+      "cooling_rho_tight": 0.09254808723926544,
+      "cooling_rho_loose": 0.19254808127880096,
+      "peak_value": 0.683520495891571,
+      "final_spatial_max": 0.2074519246816635,
+      "wall_time_s_estimate": 172.0,
+      "source_checkpoint": "results/diffusion1d_abl_w10_s0.pt",
+      "source_field": "results/diffusion1d_abl_w10_s0_field.pt"
+    }
+  ],
+  "conclusion": {
+    "cooling_tight_first_satisfied_at_lambda": 2,
+    "recommended_reference_lambda": 4,
+    "rationale": "lambda=4 is the first setting with a comfortably positive cooling margin while remaining noticeably closer to the analytic diffusion solution than the larger penalties."
+  }
+}

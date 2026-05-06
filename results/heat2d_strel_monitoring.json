@@ -1,0 +1,38 @@
+{
+  "experiment": "heat2d_strel_monitoring",
+  "field_shape": [
+    32,
+    32,
+    50
+  ],
+  "dt": 0.05,
+  "alpha": 0.5,
+  "spatial_max_initial": 0.9734442234039307,
+  "spatial_max_final": 0.6708745360374451,
+  "threshold_analysis": {
+    "mean+0.5*std": {
+      "theta": 0.0894,
+      "satisfied": false,
+      "first_quench_time": null,
+      "robustness_at_final": -0.5815
+    },
+    "quantile_0.99": {
+      "theta": 0.6376,
+      "satisfied": false,
+      "first_quench_time": null,
+      "robustness_at_final": -0.0333
+    },
+    "quantile_0.995": {
+      "theta": 0.7255,
+      "satisfied": true,
+      "first_quench_time": 1.85,
+      "robustness_at_final": 0.0546
+    },
+    "quantile_0.999": {
+      "theta": 0.8604,
+      "satisfied": true,
+      "first_quench_time": 0.7000000000000001,
+      "robustness_at_final": 0.1895
+    }
+  }
+}

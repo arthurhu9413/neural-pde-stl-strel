@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project — large binary training artifacts
+*.pt
+*.npy
+!assets/**/*.npy
+!assets/**/*.json
+
+# Keep results/ summary files (JSON, CSV) tracked; ignore timestamped run dirs
+# produced by ad hoc local validation runs. The committed top-level artifacts in
+# results/ remain the source of truth for figures and tables.
+results/*--*--*/
+results/*--*--*/**
+results/**/diffusion1d_*.pt
+results/**/diffusion1d_*_field.pt
+results/**/env.json
+!results/*.pt
+results/_smoke/
+results/_audit/
+results/_tmp/
+
+# Local scratch/config directories used by validation helpers and `.env.example` defaults
+.env
+.cache/
+.mplconfig/
+.pycache/
+.figure-check/
+.pytest_cache/
+.ruff_cache/
+logs/
+runs/
+.tmp/
+data/

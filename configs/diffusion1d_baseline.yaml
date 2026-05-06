@@ -1,0 +1,44 @@
+# 1D Diffusion PINN -- baseline (no STL penalty)
+experiment: diffusion1d
+tag: baseline
+seed: 0
+device: null
+dtype: float32
+print_every: 25
+amp: false
+compile: false
+
+physics:
+  alpha: 0.1  # diffusion coefficient
+
+model:
+  hidden: [64, 64, 64]
+  activation: tanh
+  out_activation: null
+
+grid:
+  x_min: 0.0
+  x_max: 1.0
+  t_min: 0.0
+  t_max: 1.0
+  n_x: 128
+  n_t: 64
+
+optim:
+  epochs: 400
+  lr: 0.002
+  weight_decay: 0.0
+  batch: 4096
+  n_boundary: 256
+  n_initial: 512
+  bcic_weight: 1.0
+  sample_method: sobol
+
+stl:
+  use: false
+  weight: 0.0
+
+io:
+  results_dir: results
+  save_ckpt: true
+  save_metrics: true

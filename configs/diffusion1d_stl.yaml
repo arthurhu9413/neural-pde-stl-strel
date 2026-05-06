@@ -1,0 +1,57 @@
+# 1D Diffusion PINN -- STL-regularized training
+experiment: diffusion1d
+tag: stl
+seed: 0
+device: null
+dtype: float32
+print_every: 25
+amp: false
+compile: false
+
+physics:
+  alpha: 0.1
+
+model:
+  hidden: [64, 64, 64]
+  activation: tanh
+  out_activation: null
+
+grid:
+  x_min: 0.0
+  x_max: 1.0
+  t_min: 0.0
+  t_max: 1.0
+  n_x: 128
+  n_t: 64
+
+optim:
+  epochs: 800
+  lr: 0.002
+  weight_decay: 0.0
+  batch: 4096
+  n_boundary: 256
+  n_initial: 512
+  bcic_weight: 1.0
+  sample_method: sobol
+
+stl:
+  use: true
+  weight: 5.0          # lambda: STL penalty weight in total loss
+  u_max: 1.0           # U_max for safety spec G[0,T](s(t) <= U_max)
+  temp: 0.1            # softmin/softmax temperature
+  penalty: softplus    # penalty shape: softplus | hinge | sqhinge
+  beta: 10.0           # softplus sharpness
+  margin: 0.0          # robustness margin
+  reduce_x: mean       # spatial reduction: mean | softmax | amax
+  monitor_nx: 64       # spatial grid points for STL monitor
+  monitor_nt: 64       # temporal grid points for STL monitor
+  eval_specs:
+    cool:
+      rtamt: "eventually[80,100] (s <= 0.3)"
+      agg: min
+      description: "F[0.8T,T](s(t) <= 0.3) cooling check"
+
+io:
+  results_dir: results
+  save_ckpt: true
+  save_metrics: true

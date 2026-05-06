@@ -1,0 +1,5 @@
+threshold_rule,theta,satisfied,first_quench_time,robustness_at_final
+mean+0.5*std,0.0894,False,,-0.5815
+quantile_0.99,0.6376,False,,-0.0333
+quantile_0.995,0.7255,True,1.85,0.0546
+quantile_0.999,0.8604,True,0.7000000000000001,0.1895
